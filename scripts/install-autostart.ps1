@@ -1,4 +1,4 @@
-# 在启动文件夹创建快捷方式，让 imebind 开机自启
+﻿# 在启动文件夹创建快捷方式，让 imebind 开机自启
 # 用法：pwsh -NoProfile -File scripts\install-autostart.ps1
 $ErrorActionPreference = 'Stop'
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path

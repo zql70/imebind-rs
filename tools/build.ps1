@@ -1,4 +1,4 @@
-# 构建 Rust 版，并把 exe 部署到仓库根目录
+﻿# 构建 Rust 版，并把 exe 部署到仓库根目录
 #
 # 为什么要复制出来：程序运行时按 **exe 所在目录** 找 rules.txt / imebind.log / icon.ico，
 # 而 cargo 的产物在 target/release/ 下。所以要么把 exe 复制到根目录（本脚本的做法），
