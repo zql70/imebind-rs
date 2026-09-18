@@ -1,6 +1,6 @@
 # imebind
 
-按前台程序自动切换 Windows 输入法（TSF）。C# 版（`ime-per-app`）的 Rust 重写。
+按前台程序自动切换 Windows 输入法（TSF）。C# 版（`imebind-csharp`）的 Rust 重写。
 
 **功能已与 C# 版对齐**：托盘图标与右键菜单、单实例保护、退出时还原输入法都已完成，可以直接替代 C# 版使用。
 
@@ -126,7 +126,7 @@ scripts/uninstall-autostart.ps1   撤销自启并结束正在运行的实例
 
 ```powershell
 Stop-Process -Name ImeBind -Force
-pwsh -NoProfile -File ..\ime-per-app\scripts\uninstall-autostart.ps1   # 如果之前设过自启
+pwsh -NoProfile -File ..\imebind-csharp\scripts\uninstall-autostart.ps1   # 如果之前设过自启
 .\imebind.exe
 ```
 

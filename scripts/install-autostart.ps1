@@ -1,4 +1,4 @@
-﻿# 在启动文件夹创建快捷方式，让 imebind 开机自启
+# 在启动文件夹创建快捷方式，让 imebind 开机自启
 # 用法：pwsh -NoProfile -File scripts\install-autostart.ps1
 $ErrorActionPreference = 'Stop'
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -29,5 +29,5 @@ if ($other) {
     Write-Output ""
     Write-Output ("注意：启动文件夹里还有 C# 版的自启项 " + $other.FullName)
     Write-Output "两个版本不能同时运行（共用单实例互斥量），建议删掉那个快捷方式，"
-    Write-Output "或运行 ime-per-app\scripts\uninstall-autostart.ps1。"
+    Write-Output "或运行 imebind-csharp\scripts\uninstall-autostart.ps1。"
 }
