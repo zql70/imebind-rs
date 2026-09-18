@@ -1,0 +1,38 @@
+[package]
+name = "imebind"
+version = "0.1.0"
+edition = "2021"
+description = "按前台程序自动切换 Windows 输入法（TSF）"
+license = "MIT"
+
+[dependencies]
+# windows crate 按 feature 裁剪：全量绑定巨大，只开需要的模块
+# 注意 Win32_UI_Input_KeyboardAndMouse 必须开 —— HKL 和 TF_INPUTPROCESSORPROFILE 都被它门控
+# 不开这个 feature，ActivateProfile/GetActiveProfile 这些方法会直接"不存在"
+windows = { version = "0.62", features = [    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_TextServices",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_HiDpi",
+] }
+
+[build-dependencies]
+# 只用于把 icon.ico 编进 exe 资源段（见 build.rs）
+embed-resource = "3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

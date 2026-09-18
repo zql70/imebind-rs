@@ -1,0 +1,12 @@
+# 编译产物
+/target
+
+# 部署到根目录的 exe（由 tools/build.ps1 复制出来）
+/imebind.exe
+
+# 运行时产物
+imebind.log
+rules.txt
+
+# 本地开发笔记（验证记录、踩坑、审计结果），不发布
+DEV-NOTES.md

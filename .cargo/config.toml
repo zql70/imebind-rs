@@ -1,0 +1,10 @@
+# 静态链接 C 运行库（CRT）。
+#
+# 默认情况下 Rust 在 MSVC 目标是动态链接 CRT，产出的 exe 会依赖 VCRUNTIME140.dll
+# 和 api-ms-win-crt-*.dll —— 前者来自「VC++ 可再发行包」，纯净系统上可能没有。
+# 打开 crt-static 后这些依赖全部消失，只剩操作系统自带的 DLL，
+# 于是真正变成"一个文件、任何 Win10/11 直接双击就能跑"。
+#
+# 代价：exe 从约 174 KB 增到约 269 KB。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
