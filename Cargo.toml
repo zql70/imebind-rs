@@ -9,6 +9,10 @@ license = "MIT"
 # windows crate 按 feature 裁剪：全量绑定巨大，只开需要的模块
 # 注意 Win32_UI_Input_KeyboardAndMouse 必须开 —— HKL 和 TF_INPUTPROCESSORPROFILE 都被它门控
 # 不开这个 feature，ActivateProfile/GetActiveProfile 这些方法会直接"不存在"
+#
+# 另外两个隐藏依赖，实测删掉会编译失败，别按"源码里没引用"清掉：
+#   Win32_System_IO    —— 门控 WriteFile（log.rs 在用，虽然它在 Storage::FileSystem 命名空间）
+#   Win32_Graphics_Gdi —— 门控 WNDCLASSW/RegisterClassW（结构体里的 HBRUSH 字段类型）
 windows = { version = "0.62", features = [    "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",

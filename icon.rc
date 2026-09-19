@@ -21,7 +21,8 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName",      "zql70"
-            VALUE "FileDescription",  "ImeBind —— 按前台程序自动切换 Windows 输入法"
+            // 任务管理器进程列表的名称就取这个字段，保持精简
+            VALUE "FileDescription",  "ImeBind"
             VALUE "FileVersion",      "0.1.0.0"
             VALUE "InternalName",     "imebind"
             VALUE "LegalCopyright",   "Copyright (C) 2026 zql70"

@@ -16,14 +16,13 @@ pub struct Rule {
     pub profile: GUID,
     /// 规范化后的 TIP 字符串（大写），用于和当前输入法比较
     pub tip: String,
+    /// 输入法显示名（如"微软拼音"），加载时解析一次；解析失败退回 TIP 字符串
+    pub name: String,
 }
 
 impl Rule {
-    pub fn display(&self, tsf: &crate::tsf::Tsf) -> String {
-        let name = tsf
-            .description(self.langid, &self.clsid, &self.profile)
-            .unwrap_or_else(|| self.tip.clone());
-        format!("{} → {}", self.exe, name)
+    pub fn display(&self) -> String {
+        format!("{} → {}", self.exe, self.name)
     }
 }
 
@@ -41,7 +40,7 @@ pub fn ensure_example(path: &Path) {
     );
 }
 
-pub fn load(path: &Path, log: &Log) -> Vec<Rule> {
+pub fn load(path: &Path, log: &Log, tsf: &crate::tsf::Tsf) -> Vec<Rule> {
     let mut out = Vec::new();
     let Ok(text) = fs::read_to_string(path) else {
         log.write(&format!("读取 {} 失败", path.display()));
@@ -75,12 +74,18 @@ pub fn load(path: &Path, log: &Log) -> Vec<Rule> {
                     log.write(&format!("重复规则（{exe}），已忽略后一条: {line}"));
                     continue;
                 }
+                let tip = crate::tsf::format_tip(langid, &clsid, &profile);
+                // 显示名加载时解析一次缓存住，菜单/日志展示不再每次调 COM
+                let name = tsf
+                    .description(langid, &clsid, &profile)
+                    .unwrap_or_else(|| tip.clone());
                 out.push(Rule {
                     exe,
                     langid,
                     clsid,
                     profile,
-                    tip: crate::tsf::format_tip(langid, &clsid, &profile),
+                    tip,
+                    name,
                 });
             }
             Err(e) => log.write(&format!("规则解析失败，已跳过: {line} （{e}）")),

@@ -72,6 +72,23 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(String::as_str).unwrap_or("");
 
+    // --help 不需要 COM/TSF：放在 TSF 初始化之前，TSF 环境坏了它也还能打印用法
+    if mode == "--help" || mode == "-h" || mode == "/?" {
+        say("ImeBind —— 按前台程序自动切换 Windows 输入法");
+        say("");
+        say("  imebind                                    常驻（带托盘图标），按 rules.txt 自动切换");
+        say("  imebind --no-tray                          常驻但不建托盘图标（无界面模式）");
+        say("  imebind --status                           打印前台程序与当前输入法");
+        say("  imebind --list                             列出本机键盘类输入法及其 TIP");
+        say("  imebind --activate <TIP> [session|process] 手动激活指定输入法");
+        say("  imebind --dump-rules                       打印解析出的规则（自检用）");
+        say("  imebind --menu-dump                        打印托盘菜单内容（自检用）");
+        say("");
+        say("rules.txt 每行一条规则：程序名 = 输入法TIP（程序名不区分大小写，# 开头为注释）");
+        say(&format!("规则文件: {}", rules_path.display()));
+        return Ok(());
+    }
+
     let tsf = match tsf::Tsf::new() {
         Ok(t) => t,
         Err(e) => {
@@ -81,21 +98,6 @@ fn main() -> Result<()> {
     };
 
     match mode {
-        "--help" | "-h" | "/?" => {
-            say("ImeBind —— 按前台程序自动切换 Windows 输入法");
-            say("");
-            say("  imebind                                    常驻（带托盘图标），按 rules.txt 自动切换");
-            say("  imebind --no-tray                          常驻但不建托盘图标（无界面模式）");
-            say("  imebind --status                           打印前台程序与当前输入法");
-            say("  imebind --list                             列出本机键盘类输入法及其 TIP");
-            say("  imebind --activate <TIP> [session|process] 手动激活指定输入法");
-            say("  imebind --dump-rules                       打印解析出的规则（自检用）");
-            say("  imebind --menu-dump                        打印托盘菜单内容（自检用）");
-            say("");
-            say("rules.txt 每行一条规则：程序名 = 输入法TIP（程序名不区分大小写，# 开头为注释）");
-            say(&format!("规则文件: {}", rules_path.display()));
-            return Ok(());
-        }
         "--list" => {
             let active = tsf.active_tip();
             for p in tsf.list()? {
@@ -148,10 +150,10 @@ fn main() -> Result<()> {
             rules::ensure_example(&rules_path);
             // 先打标题再解析，否则解析告警会出现在标题上面（load 里边解析边写日志）
             say(&format!("规则文件: {}", rules_path.display()));
-            let list = rules::load(&rules_path, &logger);
+            let list = rules::load(&rules_path, &logger, &tsf);
             say(&format!("共 {} 条：", list.len()));
             for r in &list {
-                say(&format!("  {}", r.display(&tsf)));
+                say(&format!("  {}", r.display()));
             }
             return Ok(());
         }
@@ -160,7 +162,7 @@ fn main() -> Result<()> {
 
     // ── 常驻模式 ──────────────────────────────────────────────────────────
     rules::ensure_example(&rules_path);
-    let list = rules::load(&rules_path, &logger);
+    let list = rules::load(&rules_path, &logger, &tsf);
     if list.is_empty() {
         fatal(
             &logger,
@@ -180,7 +182,7 @@ fn main() -> Result<()> {
         tsf.active_tip().unwrap_or_default()
     ));
     for r in &list {
-        logger.write(&format!("  规则 {}", r.display(&tsf)));
+        logger.write(&format!("  规则 {}", r.display()));
     }
 
     let no_tray = args.iter().any(|a| a == "--no-tray");

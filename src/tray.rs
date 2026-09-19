@@ -40,6 +40,12 @@ pub struct App {
     /// 切换前的输入法，离开规则程序（或退出）时还原
     pub forced: Option<String>,
     seen: String,
+    /// 前台程序名缓存：(hwnd, pid) 没变就复用，省掉每 250ms 一次的 OpenProcess
+    fg_hwnd: isize,
+    fg_pid: u32,
+    fg_exe: String,
+    /// RegisterWindowMessageW("TaskbarCreated") 的消息号；Explorer 重启后靠它重建托盘图标
+    wm_taskbar_created: u32,
     reassert_until: Option<std::time::Instant>,
     hwnd: HWND,
     nid: NOTIFYICONDATAW,
@@ -59,6 +65,10 @@ impl App {
             paused: false,
             forced: None,
             seen: String::new(),
+            fg_hwnd: 0,
+            fg_pid: 0,
+            fg_exe: String::new(),
+            wm_taskbar_created: 0,
             reassert_until: None,
             hwnd: HWND::default(),
             nid: NOTIFYICONDATAW::default(),
@@ -70,14 +80,11 @@ impl App {
     // ── 核心切换逻辑（无界面模式也用它） ─────────────────────────────────
 
     pub fn poll(&mut self) {
-        let exe = foreground_exe();
+        let exe = self.foreground_exe();
         if self.paused {
-            // 暂停时只跟随前台程序刷新托盘提示，不做任何切换；
-            // 同时把 seen 跟上，避免恢复后误报"前台切换"并重新应用规则
-            if exe != self.seen {
-                self.seen = exe;
-                self.update_tip();
-            }
+            // 暂停时不做任何切换；把 seen 跟上，避免恢复后误报"前台切换"并重新应用规则。
+            // 不刷托盘提示：tooltip 只由 paused 决定，暂停/恢复时 toggle_pause 自己会刷新
+            self.seen = exe;
             return;
         }
         if exe != self.seen {
@@ -111,7 +118,6 @@ impl App {
                 None => self.restore_forced("离开规则程序"),
             }
             self.seen = exe;
-            self.update_tip();
         } else if let Some(deadline) = self.reassert_until {
             if std::time::Instant::now() < deadline {
                 if let Some(r) = rules::find(&self.rules, &exe) {
@@ -147,6 +153,30 @@ impl App {
                 );
                 self.log.write(&format!("{why}，还原为 {tip} ({hr:?})"));
             }
+        }
+    }
+
+    /// 前台程序名，按 (hwnd, pid) 缓存：轮询每 250ms 一次，绝大多数时候前台没变，
+    /// 直接复用上次结果。PID 会被系统复用，缓存键必须带上窗口句柄。
+    fn foreground_exe(&mut self) -> String {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
+            if pid == 0 {
+                self.fg_hwnd = 0;
+                self.fg_pid = 0;
+                self.fg_exe.clear();
+                return String::new();
+            }
+            if pid == self.fg_pid && hwnd.0 as isize == self.fg_hwnd {
+                return self.fg_exe.clone();
+            }
+            let name = query_image_name(pid);
+            self.fg_hwnd = hwnd.0 as isize;
+            self.fg_pid = pid;
+            self.fg_exe = name.clone();
+            name
         }
     }
 
@@ -215,6 +245,9 @@ impl App {
             self.log
                 .write(&format!("托盘图标已创建（{}px 帧）", small_icon_size()));
 
+            // Explorer 重启时旧托盘图标随 shell 一起消失，新 shell 起来会广播 TaskbarCreated，
+            // 记下消息号，wndproc 收到后重建图标
+            self.wm_taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
             SetTimer(Some(hwnd), TIMER_POLL, POLL_MS, None);
 
             // 消息循环（GetMessageW 返回 -1 表示出错，所以判断 > 0）
@@ -227,21 +260,16 @@ impl App {
         Ok(true)
     }
 
+    /// 托盘悬停提示：只显示运行状态（规则见右键菜单，前台变化见日志）
     fn short_status(&self) -> String {
-        let mut s = format!(
-            "ImeBind {} 规则{}",
+        format!(
+            "ImeBind {}",
             if self.paused {
                 "[已暂停]"
             } else {
                 "[运行中]"
-            },
-            self.rules.len()
-        );
-        let fg = foreground_exe();
-        if !fg.is_empty() {
-            s.push_str(&format!(" 前台:{fg}"));
-        }
-        s.chars().take(62).collect()
+            }
+        )
     }
 
     fn update_tip(&mut self) {
@@ -274,6 +302,18 @@ impl App {
         self.nid.uFlags &= !NIF_INFO;
     }
 
+    /// Explorer 重启后托盘图标随旧 shell 一起消失；TaskbarCreated 到来时重建。
+    /// nid 里的 hIcon 是本进程的 GDI 对象、szTip 是最新文本，都还有效，直接 NIM_ADD
+    fn readd_tray_icon(&mut self) {
+        unsafe {
+            if Shell_NotifyIconW(NIM_ADD, &self.nid).as_bool() {
+                self.log.write("Explorer 已重启，托盘图标已重建");
+            } else {
+                self.log.write("Explorer 重启后重建托盘图标失败");
+            }
+        }
+    }
+
     /// 构建右键菜单（内容与 C# 版一致）。抽出来是为了让 show_menu 和 dump_menu 共用
     pub fn build_menu(&self) -> windows::core::Result<HMENU> {
         unsafe {
@@ -300,7 +340,7 @@ impl App {
                         append_gray(menu, "  ...");
                         break;
                     }
-                    append_gray(menu, &format!("  {}", r.display(&self.tsf)));
+                    append_gray(menu, &format!("  {}", r.display()));
                 }
             }
 
@@ -418,7 +458,7 @@ impl App {
     }
 
     fn reload_rules(&mut self) {
-        self.rules = rules::load(&self.rules_path, &self.log);
+        self.rules = rules::load(&self.rules_path, &self.log, &self.tsf);
         self.log
             .write(&format!("重新加载 rules.txt：{} 条规则", self.rules.len()));
         self.last_tip.clear();
@@ -474,6 +514,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 (WM_LBUTTONDBLCLK, false) => (*app).balloon(),
                 _ => {}
             }
+            LRESULT(0)
+        }
+        msg if !app.is_null() && msg != 0 && msg == (*app).wm_taskbar_created => {
+            (*app).readd_tray_icon();
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -553,12 +597,8 @@ fn load_icon(dir: &std::path::Path) -> HICON {
     }
 }
 
-/// 取前台窗口所属进程的 exe 文件名
+/// 取前台窗口所属进程的 exe 文件名（一次性查询，无缓存；轮询请走 App::foreground_exe）
 pub fn foreground_exe() -> String {
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
     unsafe {
         let hwnd = GetForegroundWindow();
         let mut pid: u32 = 0;
@@ -566,6 +606,18 @@ pub fn foreground_exe() -> String {
         if pid == 0 {
             return String::new();
         }
+        query_image_name(pid)
+    }
+}
+
+/// 打开进程查询映像名，只返回文件名。
+/// 先在 UTF-16 切片上定位最后一个反斜杠再转换，避免"整路径 + 文件名"两次 String 分配
+fn query_image_name(pid: u32) -> String {
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
         let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
             return String::new();
         };
@@ -577,10 +629,11 @@ pub fn foreground_exe() -> String {
         if ok.is_err() {
             return String::new();
         }
-        String::from_utf16_lossy(&buf[..size as usize])
-            .rsplit('\\')
-            .next()
-            .unwrap_or("")
-            .to_string()
+        let full = &buf[..size as usize];
+        let start = full
+            .iter()
+            .rposition(|&c| c == '\\' as u16)
+            .map_or(0, |i| i + 1);
+        String::from_utf16_lossy(&full[start..])
     }
 }
