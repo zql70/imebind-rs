@@ -144,40 +144,41 @@ impl App {
 
     fn restore_forced(&mut self, why: &str) {
         if let Some(tip) = self.forced.take() {
-            if let Ok((langid, clsid, profile)) = tsf::parse_tip(&tip) {
-                let hr = self.tsf.activate(
-                    langid,
-                    &clsid,
-                    &profile,
-                    tsf::TF_IPPMF_FORPROCESS | tsf::TF_IPPMF_FORSESSION,
-                );
-                self.log.write(&format!("{why}，还原为 {tip} ({hr:?})"));
-            }
+            let flags = tsf::TF_IPPMF_FORPROCESS | tsf::TF_IPPMF_FORSESSION;
+            // forced 有两种形式：TIP（TSF 输入法）和 HKL（"0804:HKL:08040804"，键盘布局如
+            // "美式键盘"——active_tip 对布局型 profile 输出这种形式）。HKL 形式 parse_tip
+            // 解析不了，之前在这里被 if let Ok 整个吞掉：不还原、不记日志。
+            let hr = if let Some((langid, hkl)) = tsf::parse_hkl_tip(&tip) {
+                self.tsf.activate_hkl(langid, hkl, flags)
+            } else if let Ok((langid, clsid, profile)) = tsf::parse_tip(&tip) {
+                self.tsf.activate(langid, &clsid, &profile, flags)
+            } else {
+                self.log
+                    .write(&format!("{why}，还原目标无法解析，已放弃: {tip}"));
+                return;
+            };
+            self.log.write(&format!("{why}，还原为 {tip} ({hr:?})"));
         }
     }
 
     /// 前台程序名，按 (hwnd, pid) 缓存：轮询每 250ms 一次，绝大多数时候前台没变，
     /// 直接复用上次结果。PID 会被系统复用，缓存键必须带上窗口句柄。
     fn foreground_exe(&mut self) -> String {
-        unsafe {
-            let hwnd = GetForegroundWindow();
-            let mut pid: u32 = 0;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
-            if pid == 0 {
-                self.fg_hwnd = 0;
-                self.fg_pid = 0;
-                self.fg_exe.clear();
-                return String::new();
-            }
-            if pid == self.fg_pid && hwnd.0 as isize == self.fg_hwnd {
-                return self.fg_exe.clone();
-            }
-            let name = query_image_name(pid);
-            self.fg_hwnd = hwnd.0 as isize;
-            self.fg_pid = pid;
-            self.fg_exe = name.clone();
-            name
+        let (hwnd, pid) = foreground_pid();
+        if pid == 0 {
+            self.fg_hwnd = 0;
+            self.fg_pid = 0;
+            self.fg_exe.clear();
+            return String::new();
         }
+        if pid == self.fg_pid && hwnd.0 as isize == self.fg_hwnd {
+            return self.fg_exe.clone();
+        }
+        let name = query_image_name(pid);
+        self.fg_hwnd = hwnd.0 as isize;
+        self.fg_pid = pid;
+        self.fg_exe = name.clone();
+        name
     }
 
     // ── 托盘 ────────────────────────────────────────────────────────────
@@ -528,7 +529,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
-fn to_utf16(s: &str) -> Vec<u16> {
+/// 字符串 → 以 NUL 结尾的 UTF-16（Win32 字符串参数用；fatal 的弹窗也用它）
+pub(crate) fn to_utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
@@ -599,14 +601,20 @@ fn load_icon(dir: &std::path::Path) -> HICON {
 
 /// 取前台窗口所属进程的 exe 文件名（一次性查询，无缓存；轮询请走 App::foreground_exe）
 pub fn foreground_exe() -> String {
+    let (_, pid) = foreground_pid();
+    if pid == 0 {
+        return String::new();
+    }
+    query_image_name(pid)
+}
+
+/// 前台窗口句柄 + 所属进程 ID（没有前台窗口时 pid 为 0）
+fn foreground_pid() -> (HWND, u32) {
     unsafe {
         let hwnd = GetForegroundWindow();
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
-        if pid == 0 {
-            return String::new();
-        }
-        query_image_name(pid)
+        (hwnd, pid)
     }
 }
 

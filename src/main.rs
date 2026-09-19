@@ -11,7 +11,7 @@
 //!   imebind --help                                 打印用法
 //!   imebind --status                               打印前台程序与当前输入法（--probe 同义）
 //!   imebind --list                                 列出本机键盘类输入法及其 TIP
-//!   imebind --activate <TIP> [session|process]     手动激活指定输入法
+//!   imebind --activate <TIP|HKL> [session|process] 手动激活指定输入法
 //!   imebind --dump-rules                           打印解析出的规则（自检用）
 //!   imebind --menu-dump                            打印托盘菜单内容（自检用，不用点鼠标）
 //!
@@ -37,8 +37,8 @@ use windows::Win32::UI::HiDpi::{
 /// "双击了但什么都没发生"——所以这类情况必须弹窗。
 fn fatal(log: &Log, msg: &str) {
     log.write(msg);
-    let text: Vec<u16> = msg.encode_utf16().chain(Some(0)).collect();
-    let title: Vec<u16> = "ImeBind".encode_utf16().chain(Some(0)).collect();
+    let text = tray::to_utf16(msg);
+    let title = tray::to_utf16("ImeBind");
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
             None,
@@ -78,9 +78,11 @@ fn main() -> Result<()> {
         say("");
         say("  imebind                                    常驻（带托盘图标），按 rules.txt 自动切换");
         say("  imebind --no-tray                          常驻但不建托盘图标（无界面模式）");
-        say("  imebind --status                           打印前台程序与当前输入法");
+        say(
+            "  imebind --status                           打印前台程序与当前输入法（--probe 同义）",
+        );
         say("  imebind --list                             列出本机键盘类输入法及其 TIP");
-        say("  imebind --activate <TIP> [session|process] 手动激活指定输入法");
+        say("  imebind --activate <TIP|HKL> [session|process] 手动激活指定输入法");
         say("  imebind --dump-rules                       打印解析出的规则（自检用）");
         say("  imebind --menu-dump                        打印托盘菜单内容（自检用）");
         say("");
@@ -122,7 +124,7 @@ fn main() -> Result<()> {
         }
         "--activate" => {
             let Some(tip) = args.get(2) else {
-                say("用法: imebind --activate <TIP> [session|process]");
+                say("用法: imebind --activate <TIP|HKL> [session|process]");
                 return Ok(());
             };
             let mut flags = tsf::TF_IPPMF_FORPROCESS | tsf::TF_IPPMF_FORSESSION;
@@ -131,14 +133,19 @@ fn main() -> Result<()> {
                 Some("process") => flags = tsf::TF_IPPMF_FORPROCESS,
                 _ => {}
             }
-            let (langid, clsid, profile) = match tsf::parse_tip(tip) {
-                Ok(v) => v,
-                Err(e) => {
-                    say(&format!("TIP 解析失败: {e}"));
-                    return Ok(());
-                }
+            // 两种形式都收：TIP（TSF 输入法）和 HKL（键盘布局，如 0409:HKL:04090409）
+            let hr = if let Some((langid, hkl)) = tsf::parse_hkl_tip(tip) {
+                tsf.activate_hkl(langid, hkl, flags)
+            } else {
+                let (langid, clsid, profile) = match tsf::parse_tip(tip) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        say(&format!("TIP 解析失败: {e}"));
+                        return Ok(());
+                    }
+                };
+                tsf.activate(langid, &clsid, &profile, flags)
             };
-            let hr = tsf.activate(langid, &clsid, &profile, flags);
             sleep(Duration::from_millis(300));
             say(&format!(
                 "  激活 {tip} -> {hr:?}，当前为 {}",
@@ -163,28 +170,6 @@ fn main() -> Result<()> {
     // ── 常驻模式 ──────────────────────────────────────────────────────────
     rules::ensure_example(&rules_path);
     let list = rules::load(&rules_path, &logger, &tsf);
-    if list.is_empty() {
-        fatal(
-            &logger,
-            &format!(
-                "{} 里没有有效规则，程序无法启动。\r\n\r\n\
-                 请用记事本打开它，填入至少一条规则，例如：\r\n\
-                 dota2.exe = 0804:{{CLSID}}{{ProfileGUID}}\r\n\r\n\
-                 可用的输入法 TIP 用 `imebind.exe --list` 查看（需在终端里运行）。",
-                rules_path.display()
-            ),
-        );
-        return Ok(());
-    }
-    logger.write(&format!(
-        "启动：加载 {} 条规则，当前={}",
-        list.len(),
-        tsf.active_tip().unwrap_or_default()
-    ));
-    for r in &list {
-        logger.write(&format!("  规则 {}", r.display()));
-    }
-
     let no_tray = args.iter().any(|a| a == "--no-tray");
     let mut app = tray::App::new(tsf, logger, dir, list);
 
@@ -194,7 +179,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // 单实例保护：两个常驻实例会互相抢输入法。
+    // 单实例保护：两个常驻实例会互相抢输入法。放在"启动"日志之前——排第二的
+    // 实例到此为止，不留假启动记录（--menu-dump 是诊断模式，不受互斥量限制）。
     // 注意 CreateMutexW 必须配合 GetLastError 判断，否则拿不到 ERROR_ALREADY_EXISTS。
     // （句柄不需要显式关闭：HANDLE 没有 Drop 实现，进程退出时由系统回收；
     //   绑定到 _mutex 只是为了让所有权明确。）
@@ -225,6 +211,28 @@ fn main() -> Result<()> {
             }
         }
     };
+
+    if app.rules.is_empty() {
+        fatal(
+            &app.log,
+            &format!(
+                "{} 里没有有效规则，程序无法启动。\r\n\r\n\
+                 请用记事本打开它，填入至少一条规则，例如：\r\n\
+                 dota2.exe = 0804:{{CLSID}}{{ProfileGUID}}\r\n\r\n\
+                 可用的输入法 TIP 用 `imebind.exe --list` 查看（需在终端里运行）。",
+                rules_path.display()
+            ),
+        );
+        return Ok(());
+    }
+    app.log.write(&format!(
+        "启动：加载 {} 条规则，当前={}",
+        app.rules.len(),
+        app.tsf.active_tip().unwrap_or_default()
+    ));
+    for r in &app.rules {
+        app.log.write(&format!("  规则 {}", r.display()));
+    }
 
     if no_tray {
         app.log.write("以无界面模式运行（--no-tray）");

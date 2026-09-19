@@ -13,7 +13,8 @@ license = "MIT"
 # 另外两个隐藏依赖，实测删掉会编译失败，别按"源码里没引用"清掉：
 #   Win32_System_IO    —— 门控 WriteFile（log.rs 在用，虽然它在 Storage::FileSystem 命名空间）
 #   Win32_Graphics_Gdi —— 门控 WNDCLASSW/RegisterClassW（结构体里的 HBRUSH 字段类型）
-windows = { version = "0.62", features = [    "Win32_Foundation",
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
     "Win32_System_Console",

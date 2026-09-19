@@ -15,6 +15,7 @@ use windows::Win32::UI::TextServices::{
 
 // 这几个在 msctf.idl 里是 #define（不是枚举），windows crate 不导出，自己定义
 pub const TF_PROFILETYPE_INPUTPROCESSOR: u32 = 0x0001;
+pub const TF_PROFILETYPE_KEYBOARDLAYOUT: u32 = 0x0002;
 pub const TF_IPPMF_FORPROCESS: u32 = 0x1000_0000;
 pub const TF_IPPMF_FORSESSION: u32 = 0x2000_0000;
 
@@ -83,6 +84,22 @@ impl Tsf {
                 clsid,
                 profile,
                 HKL::default(),
+                flags,
+            )
+        }
+    }
+
+    /// 激活键盘布局型 profile（HKL，如"美式键盘"）。
+    /// KEYBOARDLAYOUT 类型下 ActivateProfile 忽略 clsid/guidProfile，用 hkl 定位。
+    pub fn activate_hkl(&self, langid: u16, hkl: HKL, flags: u32) -> Result<()> {
+        unsafe {
+            let _ = self.profiles.ChangeCurrentLanguage(langid);
+            self.mgr.ActivateProfile(
+                TF_PROFILETYPE_KEYBOARDLAYOUT,
+                langid,
+                &GUID::zeroed(),
+                &GUID::zeroed(),
+                hkl,
                 flags,
             )
         }
@@ -196,6 +213,18 @@ pub fn parse_tip(tip: &str) -> std::result::Result<(u16, GUID, GUID), String> {
     let clsid = parse_guid(&tip[open1 + 1..close1])?;
     let profile = parse_guid(&tip[open2 + 1..close2])?;
     Ok((langid, clsid, profile))
+}
+
+/// 解析 "0804:HKL:08040804" 形式的键盘布局串（active_tip 对键盘布局型 profile 的输出）。
+/// 不是该形式返回 None——调用方再退回 parse_tip。
+pub fn parse_hkl_tip(tip: &str) -> Option<(u16, HKL)> {
+    let (lang, rest) = tip.split_once(':')?;
+    if lang.len() != 4 {
+        return None;
+    }
+    let langid = u16::from_str_radix(lang, 16).ok()?;
+    let hkl = usize::from_str_radix(rest.strip_prefix("HKL:")?, 16).ok()?;
+    Some((langid, HKL(hkl as *mut core::ffi::c_void)))
 }
 
 /// windows-core 没有提供 GUID::from_str，所以自己拆字段
