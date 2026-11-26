@@ -10,7 +10,7 @@
 //!   imebind --no-tray                              常驻但不建托盘图标（无界面模式）
 //!   imebind --help                                 打印用法
 //!   imebind --status                               打印前台程序与当前输入法（--probe 同义）
-//!   imebind --list                                 列出本机键盘类输入法及其 TIP
+//!   imebind --list                                 列出本机键盘类 TIP 与 HKL 键盘布局
 //!   imebind --activate <TIP|HKL> [session|process] 手动激活指定输入法
 //!   imebind --dump-rules                           打印解析出的规则（自检用）
 //!   imebind --menu-dump                            打印托盘菜单内容（自检用，不用点鼠标）
@@ -82,13 +82,13 @@ fn main() -> Result<()> {
         say(
             "  imebind --status                           打印前台程序与当前输入法（--probe 同义）",
         );
-        say("  imebind --list                             列出本机键盘类输入法及其 TIP");
+        say("  imebind --list                             列出本机键盘类 TIP 与 HKL 键盘布局");
         say("  imebind --activate <TIP|HKL> [session|process] 手动激活指定输入法");
         say("  imebind --dump-rules                       打印解析出的规则（自检用）");
         say("  imebind --menu-dump                        打印托盘菜单内容（自检用）");
         say("");
-        say("rules.txt 每行一条规则：程序名 = 输入法名称或TIP [zh|en]（程序名不区分大小写，# 开头为注释）");
-        say("  名称用 --list 查看，要和显示名完全一致；可选的 zh/en 表示聚焦时切中文/英文模式");
+        say("rules.txt 每行一条规则：程序名 = 输入法名称/TIP [zh|en]，或 HKL（如 0409:HKL:04090409）");
+        say("  名称用 --list 查看；zh/en 切中英文模式；HKL 用于 WezTerm 这类 IMM32 程序");
         say(&format!("规则文件: {}", rules_path.display()));
         return Ok(());
     }
@@ -104,13 +104,25 @@ fn main() -> Result<()> {
     match mode {
         "--list" => {
             let active = tsf.active_tip();
+            say("键盘类 TIP:");
             for p in tsf.list()? {
                 let mark = if active.as_deref() == Some(p.tip().as_str()) {
-                    "   ← 当前"
+                    "   ← 本进程当前"
                 } else {
                     ""
                 };
                 say(&format!("  {}   {}{}", p.tip(), p.name, mark));
+            }
+            let hkls = tsf::list_hkl();
+            if !hkls.is_empty() {
+                say("");
+                say("键盘布局（HKL，可直接写进 rules.txt）:");
+                for h in hkls {
+                    say(&format!(
+                        "  {:04X}:HKL:{:08X}   {}",
+                        h.langid, h.hkl.0 as usize as u32, h.name
+                    ));
+                }
             }
             return Ok(());
         }

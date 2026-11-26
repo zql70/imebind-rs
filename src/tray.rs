@@ -109,31 +109,59 @@ impl App {
             self.mode_warned = false;
             match rules::find(&self.rules, &exe) {
                 Some(r) => {
-                    let cur = self.tsf.active_tip().unwrap_or_default();
-                    if !cur.eq_ignore_ascii_case(&r.tip) {
-                        // 只在第一次记录"用户原本的输入法"：在两个规则程序之间切换时，
-                        // 上一个规则的目标输入法不是用户的原始状态，不能覆盖
-                        if self.forced.is_none() {
-                            self.forced = Some(cur.clone());
+                    if let Some(hkl) = r.hkl {
+                        // 键盘布局：TSF 的 ActivateProfile 对别的进程不可靠，用
+                        // WM_INPUTLANGCHANGEREQUEST 切（WezTerm 这类 IMM32 程序实测有效）
+                        let hwnd = self.foreground_hwnd();
+                        let before = tsf::window_hkl(hwnd);
+                        if before != Some(hkl) {
+                            if self.forced.is_none() {
+                                let prev = match before {
+                                    Some(h) => {
+                                        let raw = h.0 as usize as u32;
+                                        format!("{:04X}:HKL:{raw:08X}", raw & 0xFFFF)
+                                    }
+                                    None => self.tsf.active_tip().unwrap_or_default(),
+                                };
+                                self.forced = Some(prev);
+                            }
+                            let ok = tsf::request_hkl(hwnd, hkl);
+                            let after = tsf::window_hkl(hwnd);
+                            self.log.write(&format!(
+                                "应用键盘布局 {}: 0x{:X} -> 0x{:X} ({})",
+                                r.exe,
+                                before.map_or(0, |h| h.0 as usize as u32),
+                                after.map_or(0, |h| h.0 as usize as u32),
+                                if ok { "Ok" } else { "失败" }
+                            ));
                         }
-                        let hr = self.tsf.activate(
-                            r.langid,
-                            &r.clsid,
-                            &r.profile,
-                            tsf::TF_IPPMF_FORPROCESS | tsf::TF_IPPMF_FORSESSION,
+                    } else {
+                        let cur = self.tsf.active_tip().unwrap_or_default();
+                        if !cur.eq_ignore_ascii_case(&r.tip) {
+                            // 只在第一次记录"用户原本的输入法"：在两个规则程序之间切换时，
+                            // 上一个规则的目标输入法不是用户的原始状态，不能覆盖
+                            if self.forced.is_none() {
+                                self.forced = Some(cur.clone());
+                            }
+                            let hr = self.tsf.activate(
+                                r.langid,
+                                &r.clsid,
+                                &r.profile,
+                                tsf::TF_IPPMF_FORPROCESS | tsf::TF_IPPMF_FORSESSION,
+                            );
+                            self.log.write(&format!(
+                                "应用规则 {}: {} -> {} ({hr:?})",
+                                r.exe, cur, r.tip
+                            ));
+                        }
+                        apply_mode(
+                            &self.log,
+                            self.fg_hwnd,
+                            &mut self.mode_warned,
+                            &mut self.mode_cache,
+                            r,
                         );
-                        self.log.write(&format!(
-                            "应用规则 {}: {} -> {} ({hr:?})",
-                            r.exe, cur, r.tip
-                        ));
                     }
-                    apply_mode(
-                        &self.log,
-                        self.fg_hwnd,
-                        &mut self.mode_warned,
-                        &mut self.mode_cache,
-                        r,
-                    );
                     self.reassert_until = Some(
                         std::time::Instant::now()
                             + std::time::Duration::from_millis(REASSERT_MS as u64),
@@ -145,42 +173,51 @@ impl App {
         } else if let Some(deadline) = self.reassert_until {
             if std::time::Instant::now() < deadline {
                 if let Some(r) = rules::find(&self.rules, &exe) {
-                    let cur = self.tsf.active_tip().unwrap_or_default();
-                    if !cur.eq_ignore_ascii_case(&r.tip) {
-                        let hr = self.tsf.activate(
-                            r.langid,
-                            &r.clsid,
-                            &r.profile,
-                            tsf::TF_IPPMF_FORPROCESS | tsf::TF_IPPMF_FORSESSION,
-                        );
-                        self.log.write(&format!(
-                            "补偿一次 {}: {} -> {} ({hr:?})",
-                            r.exe, cur, r.tip
-                        ));
-                        // 重新激活输入法可能把中英文模式重置掉，同一次补偿里一起处理
-                        let ok = apply_mode(
-                            &self.log,
-                            self.fg_hwnd,
-                            &mut self.mode_warned,
-                            &mut self.mode_cache,
-                            r,
-                        );
-                        if ok {
+                    if let Some(hkl) = r.hkl {
+                        // 键盘布局：窗口被别的程序改回去时补一次
+                        let hwnd = self.foreground_hwnd();
+                        if tsf::window_hkl(hwnd) != Some(hkl) && tsf::request_hkl(hwnd, hkl) {
+                            self.log.write(&format!("补偿键盘布局 {}", r.exe));
                             self.reassert_until = None;
                         }
-                    } else if r.mode.is_some() {
-                        // 只在目标不符时补偿；成功一次就结束补偿窗口，之后用户可按 Shift 手动切
-                        let matches = mode_matches(self.fg_hwnd, &self.mode_cache, r);
-                        let ok = !matches
-                            && apply_mode(
+                    } else {
+                        let cur = self.tsf.active_tip().unwrap_or_default();
+                        if !cur.eq_ignore_ascii_case(&r.tip) {
+                            let hr = self.tsf.activate(
+                                r.langid,
+                                &r.clsid,
+                                &r.profile,
+                                tsf::TF_IPPMF_FORPROCESS | tsf::TF_IPPMF_FORSESSION,
+                            );
+                            self.log.write(&format!(
+                                "补偿一次 {}: {} -> {} ({hr:?})",
+                                r.exe, cur, r.tip
+                            ));
+                            // 重新激活输入法可能把中英文模式重置掉，同一次补偿里一起处理
+                            let ok = apply_mode(
                                 &self.log,
                                 self.fg_hwnd,
                                 &mut self.mode_warned,
                                 &mut self.mode_cache,
                                 r,
                             );
-                        if ok {
-                            self.reassert_until = None;
+                            if ok {
+                                self.reassert_until = None;
+                            }
+                        } else if r.mode.is_some() {
+                            // 只在目标不符时补偿；成功一次就结束补偿窗口，之后用户可按 Shift 手动切
+                            let matches = mode_matches(self.fg_hwnd, &self.mode_cache, r);
+                            let ok = !matches
+                                && apply_mode(
+                                    &self.log,
+                                    self.fg_hwnd,
+                                    &mut self.mode_warned,
+                                    &mut self.mode_cache,
+                                    r,
+                                );
+                            if ok {
+                                self.reassert_until = None;
+                            }
                         }
                     }
                 }
@@ -193,20 +230,37 @@ impl App {
     fn restore_forced(&mut self, why: &str) {
         if let Some(tip) = self.forced.take() {
             let flags = tsf::TF_IPPMF_FORPROCESS | tsf::TF_IPPMF_FORSESSION;
-            // forced 有两种形式：TIP（TSF 输入法）和 HKL（"0804:HKL:08040804"，键盘布局如
-            // "美式键盘"——active_tip 对布局型 profile 输出这种形式）。HKL 形式 parse_tip
-            // 解析不了，之前在这里被 if let Ok 整个吞掉：不还原、不记日志。
-            let hr = if let Some((langid, hkl)) = tsf::parse_hkl_tip(&tip) {
-                self.tsf.activate_hkl(langid, hkl, flags)
+            // forced 有两种形式：TIP（TSF 输入法）和 HKL（"0804:HKL:08040804"，键盘布局）。
+            // HKL 优先用 WM_INPUTLANGCHANGEREQUEST 还原（ActivateProfile 对别的进程不可靠），
+            // 失败再退回 TSF 的 ActivateProfile。
+            let hwnd = self.foreground_hwnd();
+            let (ok, how) = if let Some((langid, hkl)) = tsf::parse_hkl_tip(&tip) {
+                if !hwnd.0.is_null() && tsf::request_hkl(hwnd, hkl) {
+                    (true, "HKL")
+                } else {
+                    (
+                        self.tsf.activate_hkl(langid, hkl, flags).is_ok(),
+                        "ActivateProfile",
+                    )
+                }
             } else if let Ok((langid, clsid, profile)) = tsf::parse_tip(&tip) {
-                self.tsf.activate(langid, &clsid, &profile, flags)
+                (
+                    self.tsf.activate(langid, &clsid, &profile, flags).is_ok(),
+                    "ActivateProfile",
+                )
             } else {
                 self.log
                     .write(&format!("{why}，还原目标无法解析，已放弃: {tip}"));
                 return;
             };
-            self.log.write(&format!("{why}，还原为 {tip} ({hr:?})"));
+            self.log
+                .write(&format!("{why}，还原为 {tip}（{how}，成功={ok}）"));
         }
+    }
+
+    /// 当前前台窗口句柄（fg_hwnd 由 foreground_exe 维护）
+    fn foreground_hwnd(&self) -> HWND {
+        HWND(self.fg_hwnd as *mut core::ffi::c_void)
     }
 
     /// 前台程序名，按 (hwnd, pid) 缓存：轮询每 250ms 一次，绝大多数时候前台没变，

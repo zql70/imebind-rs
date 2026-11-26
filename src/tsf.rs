@@ -1,16 +1,22 @@
 //! TSF（Text Services Framework）封装：读取 / 激活 / 列举输入法
 //!
-//! Windows 没有"按应用绑定输入法"的原生功能，而所有靠键盘布局码(HKL)的方案
-//! （WM_INPUTLANGCHANGEREQUEST / LoadKeyboardLayout）都无法区分共用同一个 HKL 的两个 TSF 输入法。
-//! 唯一可行的办法是调 `ITfInputProcessorProfileMgr::ActivateProfile`。
+//! 注意：`ITfInputProcessorProfileMgr::ActivateProfile` 只可靠地作用于 TSF 感知的程序；
+//! 对 IMM32/CUAS 程序（如 WezTerm）经常返回 `Ok(())` 但目标线程实际不变（已实测）。
+//! 所以键盘布局（HKL）另有 `request_hkl`：用 `WM_INPUTLANGCHANGEREQUEST` 跨进程切换，
+//! 这是 WezTerm 这类程序唯一可靠的输入语言切换方式（但它区分不了共用同一 HKL 的两个 TIP）。
 use windows::core::{Result, BSTR, GUID};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, GetKeyboardLayoutList, HKL};
 use windows::Win32::UI::TextServices::{
     CLSID_TF_InputProcessorProfiles, ITfInputProcessorProfileMgr, ITfInputProcessorProfiles,
     GUID_TFCAT_TIP_KEYBOARD, TF_INPUTPROCESSORPROFILE,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowThreadProcessId, SendMessageTimeoutW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+    WM_INPUTLANGCHANGEREQUEST,
 };
 
 // 这几个在 msctf.idl 里是 #define（不是枚举），windows crate 不导出，自己定义
@@ -172,6 +178,97 @@ impl Tsf {
             CoTaskMemFree(Some(p_lang as *const core::ffi::c_void));
         }
         Ok(out)
+    }
+}
+
+/// 当前窗口所在线程的键盘布局（HKL）
+pub fn window_hkl(hwnd: HWND) -> Option<HKL> {
+    let tid = unsafe { GetWindowThreadProcessId(hwnd, None) };
+    if tid == 0 {
+        None
+    } else {
+        Some(unsafe { GetKeyboardLayout(tid) })
+    }
+}
+
+/// 请求窗口切换到指定键盘布局，并读回确认。
+///
+/// `ActivateProfile` 对别的进程（尤其 IMM32/CUAS 程序）经常返回 Ok 但实际不变；
+/// `WM_INPUTLANGCHANGEREQUEST` 由目标窗口的 DefWindowProc 处理，是跨进程切布局的可靠方式。
+/// 注意它只能切到 HKL，区分不了共用同一个 HKL 的两个 TIP。
+pub fn request_hkl(hwnd: HWND, hkl: HKL) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    let mut result: usize = 0;
+    let r = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_INPUTLANGCHANGEREQUEST,
+            WPARAM(0),
+            LPARAM(hkl.0 as isize),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            1000,
+            Some(&mut result),
+        )
+    };
+    r.0 != 0 && window_hkl(hwnd) == Some(hkl)
+}
+
+/// 一个键盘布局（HKL）条目
+#[derive(Clone, Debug)]
+pub struct HklInfo {
+    pub langid: u16,
+    pub hkl: HKL,
+    pub name: String,
+}
+
+/// 枚举当前加载的键盘布局；按 HKL 去重
+pub fn list_hkl() -> Vec<HklInfo> {
+    let n = unsafe { GetKeyboardLayoutList(None) };
+    if n <= 0 {
+        return Vec::new();
+    }
+    let mut list = vec![HKL::default(); n as usize];
+    let got = unsafe { GetKeyboardLayoutList(Some(&mut list)) };
+    if got <= 0 {
+        return Vec::new();
+    }
+    list.truncate(got as usize);
+    let mut out: Vec<HklInfo> = Vec::new();
+    for h in list {
+        if out.iter().any(|x| x.hkl == h) {
+            continue;
+        }
+        let raw = h.0 as usize as u32;
+        let langid = (raw & 0xFFFF) as u16;
+        out.push(HklInfo {
+            langid,
+            hkl: h,
+            name: hkl_label(langid, raw),
+        });
+    }
+    out
+}
+
+/// HKL 的展示名。标准键盘布局没有 `ImmGetDescription`，按语言/HKL 给常见名字。
+pub fn hkl_label(langid: u16, hkl: u32) -> String {
+    let lang = match langid {
+        0x0409 => "英语(美国)",
+        0x0804 => "中文(简体)",
+        0x0411 => "日语",
+        0x0412 => "韩语",
+        _ => "",
+    };
+    let layout = match hkl {
+        0x0409_0409 => "美式键盘",
+        _ => "",
+    };
+    match (lang, layout) {
+        ("", "") => format!("HKL 0x{hkl:08X}"),
+        (l, "") => l.to_string(),
+        ("", k) => k.to_string(),
+        (l, k) => format!("{l} {k}"),
     }
 }
 

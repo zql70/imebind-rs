@@ -4,11 +4,13 @@
 //!   dota2.exe = 微软拼音
 //!   wezterm-gui.exe = 微软拼音 en            ← 可选 en/zh，切中英文模式
 //!   dota2.exe = 0804:{CLSID}{ProfileGUID}    ← 也可以直接写 TIP
+//!   wezterm-gui.exe = 0409:HKL:04090409      ← 键盘布局（HKL），适用于 WezTerm 等
 use crate::log::Log;
-use crate::tsf::{format_tip, parse_tip, Profile, Tsf};
+use crate::tsf::{format_tip, hkl_label, parse_hkl_tip, parse_tip, Profile, Tsf};
 use std::fs;
 use std::path::Path;
 use windows::core::GUID;
+use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 
 /// 规则可选的中英文模式（输入法的转换模式，不是另换一个输入法）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +49,8 @@ pub struct Rule {
     pub name: String,
     /// 聚焦该程序时把输入法切到中文/英文模式；None = 只切输入法，不动中英文
     pub mode: Option<ConvMode>,
+    /// 键盘布局目标（`0409:HKL:04090409`）；Some 时忽略 clsid/profile，也不支持中英文模式
+    pub hkl: Option<HKL>,
 }
 
 impl Rule {
@@ -55,7 +59,12 @@ impl Rule {
             .mode
             .map(|m| format!("（{}）", m.label()))
             .unwrap_or_default();
-        format!("{} → {}{mode}", self.exe, self.name)
+        let kind = if self.hkl.is_some() {
+            "（键盘布局）"
+        } else {
+            ""
+        };
+        format!("{} → {}{kind}{mode}", self.exe, self.name)
     }
 }
 
@@ -148,6 +157,8 @@ pub fn ensure_example(path: &Path) {
          # 示例：\r\n\
          # dota2.exe = 微软拼音\r\n\
          # wezterm-gui.exe = 微软拼音 en\r\n\
+         # 键盘布局（HKL）也可以写，WezTerm 这类 IMM32 程序请用这个：\r\n\
+         # wezterm-gui.exe = 0409:HKL:04090409\r\n\
          # 名称有歧义或想固定到具体 TIP 时，可以写完整的 TIP：\r\n\
          # dota2.exe = 0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}\r\n",
     );
@@ -185,6 +196,29 @@ pub fn load(path: &Path, log: &Log, tsf: &Tsf) -> Vec<Rule> {
         let (target, mode) = split_mode(rhs);
         if target.is_empty() {
             log.write(&format!("这一行缺少输入法，已跳过: {line}"));
+            continue;
+        }
+        // 键盘布局（HKL）：`0409:HKL:04090409`。布局本身没有中英文模式，不能带 zh/en。
+        if let Some((langid, hkl)) = parse_hkl_tip(target) {
+            if mode.is_some() {
+                log.write(&format!("键盘布局不支持 zh/en 模式，已跳过: {line}"));
+                continue;
+            }
+            if out.iter().any(|r: &Rule| r.exe == exe) {
+                log.write(&format!("重复规则（{exe}），已忽略后一条: {line}"));
+                continue;
+            }
+            let raw = hkl.0 as usize as u32;
+            out.push(Rule {
+                exe,
+                langid,
+                clsid: GUID::zeroed(),
+                profile: GUID::zeroed(),
+                tip: format!("{langid:04X}:HKL:{raw:08X}"),
+                name: hkl_label(langid, raw),
+                mode: None,
+                hkl: Some(hkl),
+            });
             continue;
         }
         // 先按 TIP 解析（老格式）；失败再按输入法显示名查（新格式）
@@ -238,6 +272,7 @@ pub fn load(path: &Path, log: &Log, tsf: &Tsf) -> Vec<Rule> {
             tip,
             name,
             mode,
+            hkl: None,
         });
     }
     out
