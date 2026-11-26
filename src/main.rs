@@ -17,6 +17,7 @@
 //!
 //! 托盘菜单：状态 / 前台程序 / 规则一览 / 暂停·恢复 / 重新加载 rules.txt /
 //!           编辑 rules.txt / 查看日志 / 打开程序所在文件夹 / 退出（退出时会还原输入法）
+mod imm;
 mod log;
 mod rules;
 mod tray;
@@ -86,7 +87,8 @@ fn main() -> Result<()> {
         say("  imebind --dump-rules                       打印解析出的规则（自检用）");
         say("  imebind --menu-dump                        打印托盘菜单内容（自检用）");
         say("");
-        say("rules.txt 每行一条规则：程序名 = 输入法TIP（程序名不区分大小写，# 开头为注释）");
+        say("rules.txt 每行一条规则：程序名 = 输入法名称或TIP [zh|en]（程序名不区分大小写，# 开头为注释）");
+        say("  名称用 --list 查看，要和显示名完全一致；可选的 zh/en 表示聚焦时切中文/英文模式");
         say(&format!("规则文件: {}", rules_path.display()));
         return Ok(());
     }

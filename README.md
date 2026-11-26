@@ -82,7 +82,14 @@ pwsh -NoProfile -File scripts\uninstall-autostart.ps1   # 撤销（并结束正�
 
 ## rules.txt
 
-每行一条规则，`#` 开头为注释，程序名不区分大小写（只匹配 exe 文件名，不写路径）：
+每行一条规则，`#` 开头为注释，程序名不区分大小写（只匹配 exe 文件名，不写路径）。右侧写**输入法显示名**最直观：
+
+```
+dota2.exe = 微软拼音
+wezterm-gui.exe = 微软拼音 en
+```
+
+名称用 `imebind --list` 查看，要和输出里的显示名完全一致（英文名不区分大小写）。同名匹配到多个 TIP 时日志会列出候选并跳过该行，这时改用 TIP。名称来自输入法自己注册的显示名，换系统语言或输入法升级后可能变化；想长期稳定就写 TIP：
 
 ```
 dota2.exe = 0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}
@@ -90,7 +97,16 @@ dota2.exe = 0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-
 
 TIP 字符串用 `imebind --list` 拿，格式是 `语言ID:{TIP的CLSID}{Profile的GUID}` —— 和 PowerShell 里 `Get-WinUserLanguageList` 输出的 `InputMethodTips` 是同一种写法，可以直接互换。
 
-文件不存在时会自动生成一份带注释的模板；改动后在托盘菜单点一下「重新加载 rules.txt」即可生效（没有做文件监听）。
+名称或 TIP 后面都可以再加一个可选的 `zh` / `en`，表示聚焦该程序时把输入法切到中文 / 英文模式（是输入法的转换模式，不是换一个输入法）：
+
+```
+wezterm-gui.exe = 微软拼音 en
+dota2.exe = 0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7} en
+```
+
+中英文只在**前台切换时**应用（外加 1.5 秒补偿窗口），之后你手动按 Shift 仍可临时切回中文。它依赖窗口暴露 IMM 输入上下文：WezTerm、Windows Terminal 实测有效；纯 TSF 程序或部分第三方输入法无效，此时日志会写「没有可用的 IMM 输入上下文」。
+
+文件不存在时会自动生成一份带注释的模板；改动后在托盘菜单点一下「重新加载 rules.txt」即可生效（没有做文件监听）。注意：重新加载只换规则表，**当前已经聚焦的程序要切出去再切回来**才会重新套用。
 
 ## 目录结构
 
@@ -105,6 +121,7 @@ imebind.log              运行日志（已 gitignore）
 src/main.rs              入口：环境初始化、命令行分派、启动流程
 src/tray.rs              托盘图标 + 右键菜单 + 消息循环 + 前台轮询（App 状态机）
 src/tsf.rs               TSF 封装：读取 / 激活 / 列举输入法
+src/imm.rs               IMM32 封装：跨进程读取 / 设置窗口的中英文模式
 src/rules.rs             rules.txt 解析
 src/log.rs               极简日志 + 控制台输出
 tools/build.ps1          构建 + 部署
@@ -120,6 +137,7 @@ scripts/uninstall-autostart.ps1   撤销自启并结束正在运行的实例
 - 用 250ms 轮询而非 `SetWinEventHook` 事件钩子
 - 商店/MSIX 应用的窗口属于 `ApplicationFrameHost.exe`，规则里写 `charmap.exe` 这类名字不会命中
 - 被任务管理器强杀时不会还原输入法（从托盘菜单「退出」会还原）
+- 规则里的 `zh`/`en` 依赖窗口的 IMM 输入上下文：对纯 TSF 程序、UWP 或部分第三方输入法可能无效（只记日志，不影响输入法切换本身）；触发仍以 exe 名为准，同一程序新开的窗口要切出去再切回来才会套用模式
 - 未做代码签名，SmartScreen 首次运行会提示"未知发布者"
 
 ## 和 C# 版的关系

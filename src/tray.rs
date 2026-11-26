@@ -2,8 +2,9 @@
 //!
 //! 用原生 Win32（`Shell_NotifyIconW` / `CreatePopupMenu` / `TrackPopupMenu`），不依赖任何 GUI 框架——
 //! 这是 Rust 版内存只有 1 MB 出头的原因（C# 版用 WinForms，要拖进 17 MB 的 System.Windows.Forms）。
+use crate::imm;
 use crate::log::Log;
-use crate::rules::{self, Rule};
+use crate::rules::{self, ConvMode, Rule};
 use crate::tsf::{self, Tsf};
 use std::path::PathBuf;
 use windows::core::{w, PCWSTR, PWSTR};
@@ -47,6 +48,8 @@ pub struct App {
     /// RegisterWindowMessageW("TaskbarCreated") 的消息号；Explorer 重启后靠它重建托盘图标
     wm_taskbar_created: u32,
     reassert_until: Option<std::time::Instant>,
+    /// 本次前台切换里「设置中英文失败」的日志是否已写过；避免补偿窗口内每 250ms 刷一行
+    mode_warned: bool,
     hwnd: HWND,
     nid: NOTIFYICONDATAW,
     tray_added: bool,
@@ -70,6 +73,7 @@ impl App {
             fg_exe: String::new(),
             wm_taskbar_created: 0,
             reassert_until: None,
+            mode_warned: false,
             hwnd: HWND::default(),
             nid: NOTIFYICONDATAW::default(),
             tray_added: false,
@@ -90,6 +94,8 @@ impl App {
         if exe != self.seen {
             self.log
                 .write(&format!("前台切换: {} -> {}", self.seen, exe));
+            // 新的前台程序：失败告警重新计数
+            self.mode_warned = false;
             match rules::find(&self.rules, &exe) {
                 Some(r) => {
                     let cur = self.tsf.active_tip().unwrap_or_default();
@@ -110,6 +116,7 @@ impl App {
                             r.exe, cur, r.tip
                         ));
                     }
+                    apply_mode(&self.log, self.fg_hwnd, &mut self.mode_warned, r);
                     self.reassert_until = Some(
                         std::time::Instant::now()
                             + std::time::Duration::from_millis(REASSERT_MS as u64),
@@ -133,7 +140,17 @@ impl App {
                             "补偿一次 {}: {} -> {} ({hr:?})",
                             r.exe, cur, r.tip
                         ));
-                        self.reassert_until = None;
+                        // 重新激活输入法可能把中英文模式重置掉，同一次补偿里一起处理
+                        if apply_mode(&self.log, self.fg_hwnd, &mut self.mode_warned, r) {
+                            self.reassert_until = None;
+                        }
+                    } else if r.mode.is_some() {
+                        // 只在目标不符时补偿；成功一次就结束补偿窗口，之后用户可按 Shift 手动切
+                        let ok = !mode_matches(self.fg_hwnd, r)
+                            && apply_mode(&self.log, self.fg_hwnd, &mut self.mode_warned, r);
+                        if ok {
+                            self.reassert_until = None;
+                        }
                     }
                 }
             } else {
@@ -597,6 +614,66 @@ fn load_icon(dir: &std::path::Path) -> HICON {
         }
         LoadIconW(None, IDI_APPLICATION).unwrap_or_default()
     }
+}
+
+/// 规则里的中英文目标值。微软拼音中文 = NATIVE|SYMBOL(0x401)，英文 = 0；
+/// 只翻 NATIVE 位会把 SYMBOL 位留下，变成"中文但半角标点"这种非默认状态。
+fn mode_target(mode: ConvMode) -> u32 {
+    match mode {
+        ConvMode::Chinese => imm::IME_CMODE_NATIVE | imm::IME_CMODE_SYMBOL,
+        ConvMode::English => 0,
+    }
+}
+
+fn hex_mode(v: Option<u32>) -> String {
+    v.map(|x| format!("0x{x:X}")).unwrap_or_else(|| "无".into())
+}
+
+/// 把规则指定的中英文模式应用到当前前台窗口。
+/// 返回 true = 目标状态已达成（本来就对，或设置成功）；窗口没有 IMM 上下文时返回 false。
+fn apply_mode(log: &Log, fg_hwnd: isize, warned: &mut bool, r: &Rule) -> bool {
+    let Some(want) = r.mode else {
+        return true;
+    };
+    if fg_hwnd == 0 {
+        return false;
+    }
+    let hwnd = HWND(fg_hwnd as *mut core::ffi::c_void);
+    let target = mode_target(want);
+    let cur = imm::conversion_mode(hwnd);
+    if cur == Some(target) {
+        return true;
+    }
+    if imm::set_conversion_mode(hwnd, target).is_none() {
+        if !*warned {
+            *warned = true;
+            log.write(&format!(
+                "设置中英文失败（{}）：窗口没有可用的 IMM 输入上下文",
+                r.exe
+            ));
+        }
+        return false;
+    }
+    let after = imm::conversion_mode(hwnd);
+    log.write(&format!(
+        "应用中英文规则 {}: {}（{} -> {}）",
+        r.exe,
+        want.label(),
+        hex_mode(cur),
+        hex_mode(after),
+    ));
+    after == Some(target)
+}
+
+fn mode_matches(fg_hwnd: isize, r: &Rule) -> bool {
+    let Some(want) = r.mode else {
+        return true;
+    };
+    if fg_hwnd == 0 {
+        return false;
+    }
+    let hwnd = HWND(fg_hwnd as *mut core::ffi::c_void);
+    imm::conversion_mode(hwnd) == Some(mode_target(want))
 }
 
 /// 取前台窗口所属进程的 exe 文件名（一次性查询，无缓存；轮询请走 App::foreground_exe）
