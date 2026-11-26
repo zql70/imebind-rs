@@ -1,6 +1,6 @@
 [package]
 name = "imebind"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "按前台程序自动切换 Windows 输入法（TSF）"
 license = "MIT"

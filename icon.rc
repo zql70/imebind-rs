@@ -8,8 +8,8 @@
 // 版本信息：没有这段的话，exe 属性里的"文件版本/产品名称/说明"都是空的。
 // 版本号要和 Cargo.toml 里的 version 保持一致。
 1 VERSIONINFO
-FILEVERSION     0,2,0,0
-PRODUCTVERSION  0,2,0,0
+FILEVERSION     0,2,1,0
+PRODUCTVERSION  0,2,1,0
 FILEFLAGSMASK   0x3fL
 FILEFLAGS       0x0L
 FILEOS          0x40004L
@@ -23,12 +23,12 @@ BEGIN
             VALUE "CompanyName",      "zql70"
             // 任务管理器进程列表的名称就取这个字段，保持精简
             VALUE "FileDescription",  "ImeBind"
-            VALUE "FileVersion",      "0.2.0.0"
+            VALUE "FileVersion",      "0.2.1.0"
             VALUE "InternalName",     "imebind"
             VALUE "LegalCopyright",   "Copyright (C) 2026 zql70"
             VALUE "OriginalFilename", "imebind.exe"
             VALUE "ProductName",      "ImeBind"
-            VALUE "ProductVersion",   "0.2.0.0"
+            VALUE "ProductVersion",   "0.2.1.0"
         END
     END
     BLOCK "VarFileInfo"

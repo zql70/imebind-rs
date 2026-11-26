@@ -31,6 +31,14 @@ const ID_LOG: u32 = 2003;
 const ID_OPENDIR: u32 = 2004;
 const ID_EXIT: u32 = 2005;
 
+/// 输入法用哪套状态表示中英文；首次应用某个 IME 时探测一次。
+/// 微软拼音认转换模式；微信输入法认 IME 开关（转换模式读回是假的）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModeMechanism {
+    Conversion,
+    OpenStatus,
+}
+
 pub struct App {
     pub tsf: Tsf,
     pub log: Log,
@@ -50,6 +58,8 @@ pub struct App {
     reassert_until: Option<std::time::Instant>,
     /// 本次前台切换里「设置中英文失败」的日志是否已写过；避免补偿窗口内每 250ms 刷一行
     mode_warned: bool,
+    /// 每个 IME（按 TIP）用哪套中英文状态；探测会短暂切换 IME 开关，所以缓存住
+    mode_cache: Vec<(String, ModeMechanism)>,
     hwnd: HWND,
     nid: NOTIFYICONDATAW,
     tray_added: bool,
@@ -74,6 +84,7 @@ impl App {
             wm_taskbar_created: 0,
             reassert_until: None,
             mode_warned: false,
+            mode_cache: Vec::new(),
             hwnd: HWND::default(),
             nid: NOTIFYICONDATAW::default(),
             tray_added: false,
@@ -116,7 +127,13 @@ impl App {
                             r.exe, cur, r.tip
                         ));
                     }
-                    apply_mode(&self.log, self.fg_hwnd, &mut self.mode_warned, r);
+                    apply_mode(
+                        &self.log,
+                        self.fg_hwnd,
+                        &mut self.mode_warned,
+                        &mut self.mode_cache,
+                        r,
+                    );
                     self.reassert_until = Some(
                         std::time::Instant::now()
                             + std::time::Duration::from_millis(REASSERT_MS as u64),
@@ -141,13 +158,27 @@ impl App {
                             r.exe, cur, r.tip
                         ));
                         // 重新激活输入法可能把中英文模式重置掉，同一次补偿里一起处理
-                        if apply_mode(&self.log, self.fg_hwnd, &mut self.mode_warned, r) {
+                        let ok = apply_mode(
+                            &self.log,
+                            self.fg_hwnd,
+                            &mut self.mode_warned,
+                            &mut self.mode_cache,
+                            r,
+                        );
+                        if ok {
                             self.reassert_until = None;
                         }
                     } else if r.mode.is_some() {
                         // 只在目标不符时补偿；成功一次就结束补偿窗口，之后用户可按 Shift 手动切
-                        let ok = !mode_matches(self.fg_hwnd, r)
-                            && apply_mode(&self.log, self.fg_hwnd, &mut self.mode_warned, r);
+                        let matches = mode_matches(self.fg_hwnd, &self.mode_cache, r);
+                        let ok = !matches
+                            && apply_mode(
+                                &self.log,
+                                self.fg_hwnd,
+                                &mut self.mode_warned,
+                                &mut self.mode_cache,
+                                r,
+                            );
                         if ok {
                             self.reassert_until = None;
                         }
@@ -477,6 +508,9 @@ impl App {
 
     fn reload_rules(&mut self) {
         self.rules = rules::load(&self.rules_path, &self.log, &self.tsf);
+        // 规则可能换了输入法；下次应用时重新探测机制
+        self.mode_cache.clear();
+        self.mode_warned = false;
         self.log
             .write(&format!("重新加载 rules.txt：{} 条规则", self.rules.len()));
         self.last_tip.clear();
@@ -616,12 +650,13 @@ fn load_icon(dir: &std::path::Path) -> HICON {
     }
 }
 
-/// 规则里的中英文目标值。微软拼音中文 = NATIVE|SYMBOL(0x401)，英文 = 0；
-/// 只翻 NATIVE 位会把 SYMBOL 位留下，变成"中文但半角标点"这种非默认状态。
-fn mode_target(mode: ConvMode) -> u32 {
+/// 规则里的中英文目标值：转换模式值和 IME 开关状态。
+/// 微软拼音中文 = NATIVE|SYMBOL(0x401)、英文 = 0；
+/// 微信输入法中文 = open(1)、英文 = open(0)。
+fn mode_target(mode: ConvMode) -> (u32, bool) {
     match mode {
-        ConvMode::Chinese => imm::IME_CMODE_NATIVE | imm::IME_CMODE_SYMBOL,
-        ConvMode::English => 0,
+        ConvMode::Chinese => (imm::IME_CMODE_NATIVE | imm::IME_CMODE_SYMBOL, true),
+        ConvMode::English => (0, false),
     }
 }
 
@@ -629,43 +664,57 @@ fn hex_mode(v: Option<u32>) -> String {
     v.map(|x| format!("0x{x:X}")).unwrap_or_else(|| "无".into())
 }
 
-/// 把规则指定的中英文模式应用到当前前台窗口。
-/// 返回 true = 目标状态已达成（本来就对，或设置成功）；窗口没有 IMM 上下文时返回 false。
-fn apply_mode(log: &Log, fg_hwnd: isize, warned: &mut bool, r: &Rule) -> bool {
-    let Some(want) = r.mode else {
-        return true;
-    };
-    if fg_hwnd == 0 {
-        return false;
+fn open_str(v: Option<bool>) -> &'static str {
+    match v {
+        Some(true) => "开",
+        Some(false) => "关",
+        None => "无",
     }
-    let hwnd = HWND(fg_hwnd as *mut core::ffi::c_void);
-    let target = mode_target(want);
-    let cur = imm::conversion_mode(hwnd);
-    if cur == Some(target) {
-        return true;
-    }
-    if imm::set_conversion_mode(hwnd, target).is_none() {
-        if !*warned {
-            *warned = true;
-            log.write(&format!(
-                "设置中英文失败（{}）：窗口没有可用的 IMM 输入上下文",
-                r.exe
-            ));
-        }
-        return false;
-    }
-    let after = imm::conversion_mode(hwnd);
-    log.write(&format!(
-        "应用中英文规则 {}: {}（{} -> {}）",
-        r.exe,
-        want.label(),
-        hex_mode(cur),
-        hex_mode(after),
-    ));
-    after == Some(target)
 }
 
-fn mode_matches(fg_hwnd: isize, r: &Rule) -> bool {
+fn warn_no_imm(log: &Log, warned: &mut bool, r: &Rule) {
+    if !*warned {
+        *warned = true;
+        log.write(&format!(
+            "设置中英文失败（{}）：窗口没有可用的 IMM 输入上下文",
+            r.exe
+        ));
+    }
+}
+
+/// 探测这个 IME 的中英文由哪套状态表示。
+///
+/// 做法是把 IME 开关拨到 关→开，看读回是否跟着变：
+/// - 微信输入法跟随开关状态（0/1）→ OpenStatus
+/// - 微软拼音会先读成 0、约 20ms 后又弹回 1（它只认转换模式）→ Conversion
+///
+/// 所以设成关之后必须等一会儿再读，否则微软拼音会被误判成开关型。
+/// 探测会短暂切换开关，所以调用方要缓存结果；窗口没有 IMM 上下文时返回 None。
+fn detect_mode_mechanism(hwnd: HWND) -> Option<ModeMechanism> {
+    let orig = imm::open_status(hwnd)?;
+    imm::set_open_status(hwnd, false)?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let low = imm::open_status(hwnd);
+    imm::set_open_status(hwnd, true)?;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let high = imm::open_status(hwnd);
+    let _ = imm::set_open_status(hwnd, orig);
+    Some(if low == Some(false) && high == Some(true) {
+        ModeMechanism::OpenStatus
+    } else {
+        ModeMechanism::Conversion
+    })
+}
+
+/// 把规则指定的中英文模式应用到当前前台窗口。
+/// 返回 true = 目标状态已达成（本来就对，或设置成功）；窗口没有 IMM 上下文时返回 false。
+fn apply_mode(
+    log: &Log,
+    fg_hwnd: isize,
+    warned: &mut bool,
+    cache: &mut Vec<(String, ModeMechanism)>,
+    r: &Rule,
+) -> bool {
     let Some(want) = r.mode else {
         return true;
     };
@@ -673,7 +722,81 @@ fn mode_matches(fg_hwnd: isize, r: &Rule) -> bool {
         return false;
     }
     let hwnd = HWND(fg_hwnd as *mut core::ffi::c_void);
-    imm::conversion_mode(hwnd) == Some(mode_target(want))
+
+    let mechanism = match cache.iter().find(|(tip, _)| tip == &r.tip) {
+        Some(&(_, m)) => m,
+        None => {
+            let Some(m) = detect_mode_mechanism(hwnd) else {
+                warn_no_imm(log, warned, r);
+                return false;
+            };
+            if m == ModeMechanism::OpenStatus {
+                log.write(&format!(
+                    "{} 的中英文由 IME 开关状态控制，按 open 处理",
+                    r.name
+                ));
+            }
+            cache.push((r.tip.clone(), m));
+            m
+        }
+    };
+
+    let (conv_target, open_target) = mode_target(want);
+    let cur_conv = imm::conversion_mode(hwnd);
+    let cur_open = imm::open_status(hwnd);
+    let satisfied = match mechanism {
+        ModeMechanism::OpenStatus => cur_open == Some(open_target),
+        ModeMechanism::Conversion => cur_conv == Some(conv_target),
+    };
+    if satisfied {
+        return true;
+    }
+
+    // OpenStatus 型：open 是实际状态，转换模式也顺手设一下（有的 IME 两者都认）
+    if mechanism == ModeMechanism::OpenStatus && imm::set_open_status(hwnd, open_target).is_none() {
+        warn_no_imm(log, warned, r);
+        return false;
+    }
+    if imm::set_conversion_mode(hwnd, conv_target).is_none()
+        && mechanism == ModeMechanism::Conversion
+    {
+        warn_no_imm(log, warned, r);
+        return false;
+    }
+
+    let after_conv = imm::conversion_mode(hwnd);
+    let after_open = imm::open_status(hwnd);
+    log.write(&format!(
+        "应用中英文规则 {}: {}（conv {} -> {}，open {} -> {}）",
+        r.exe,
+        want.label(),
+        hex_mode(cur_conv),
+        hex_mode(after_conv),
+        open_str(cur_open),
+        open_str(after_open),
+    ));
+    match mechanism {
+        ModeMechanism::OpenStatus => after_open == Some(open_target),
+        ModeMechanism::Conversion => after_conv == Some(conv_target),
+    }
+}
+
+fn mode_matches(fg_hwnd: isize, cache: &[(String, ModeMechanism)], r: &Rule) -> bool {
+    let Some(want) = r.mode else {
+        return true;
+    };
+    if fg_hwnd == 0 {
+        return false;
+    }
+    let Some(&(_, mechanism)) = cache.iter().find(|(tip, _)| tip == &r.tip) else {
+        return false;
+    };
+    let hwnd = HWND(fg_hwnd as *mut core::ffi::c_void);
+    let (conv_target, open_target) = mode_target(want);
+    match mechanism {
+        ModeMechanism::OpenStatus => imm::open_status(hwnd) == Some(open_target),
+        ModeMechanism::Conversion => imm::conversion_mode(hwnd) == Some(conv_target),
+    }
 }
 
 /// 取前台窗口所属进程的 exe 文件名（一次性查询，无缓存；轮询请走 App::foreground_exe）
